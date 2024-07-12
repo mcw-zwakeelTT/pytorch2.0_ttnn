@@ -403,6 +403,31 @@ def ReplaceMoreTtManually(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
                         new_node,
                         delete_user_cb=lambda node: node != new_node,
                     )
+            if node.target == torch.ops.aten.slice.Tensor:
+                input_shape = list(node.prev.meta["val"].shape)
+                start_indices = [0 for item in input_shape]
+                # ttnn shapes are inclusive
+                end_indices = [item-1 for item in input_shape]
+                # Pytorch slice op works on one axis/dim at a time
+                axis = args[1]
+                start_indices[axis] = args[2]
+                end_indices[axis] = args[3]
+
+                # Debugging info
+                print(f"Node: {node.name}\n")
+                print(f"input_shape: {input_shape}\n")
+                print(f"dim: {args[1]}, start: {args[2]}, end: {args[3]}\n")
+                print(f"start_indices: {start_indices}\n")
+                print(f"end_indices: {end_indices}\n")
+
+                start_shape_node = g.call_function(ttnn.Shape, (start_indices,), {})
+                end_shape_node = g.call_function(ttnn.Shape, (end_indices,), {})
+                new_args = (args[0], start_shape_node, end_shape_node)
+                new_node = g.call_function(ttnn.slice, new_args)
+                node.replace_all_uses_with(
+                    new_node,
+                    delete_user_cb=lambda node: node != new_node,
+                )
 
     gm = GraphCleanup(gm)
     return gm
