@@ -73,6 +73,17 @@ def register_ttnn_objects(option: TorchTtnnOption):
         ttnn.L1_MEMORY_CONFIG,
     )
 
+    torch.fx.graph._register_custom_builtin(
+        "run_mode_normal",
+        "",
+        ttnn.graph.RunMode.NORMAL
+    )
+    torch.fx.graph._register_custom_builtin(
+        "run_mode_no_dispatch",
+        "",
+        ttnn.graph.RunMode.NO_DISPATCH
+    )
+
 
 # The backend for torch.compile that converts a graph to use ttnn.
 # The "option" parameter is a TorchTtnnOption object
@@ -115,6 +126,7 @@ def aten_backend(
     from torch_ttnn.passes.graphviz_pass import GraphvizPass
     from torch_ttnn.passes.lowering.permute_reshape_tuple import PermuteReshapeTuple
     from torch_ttnn.passes.memory_pass import MemoryPass
+    from torch_ttnn.passes.trace_mem_pass import TraceMemoryPass
 
     passes = [
         ToTtPass(),
@@ -122,6 +134,7 @@ def aten_backend(
         EliminateCoreopsPass(),
         CSEPass(),
         PermuteReshapeTuple(),
+        TraceMemoryPass(),
     ]
 
     mem_pass = MemoryPass(option.verbose)
@@ -143,6 +156,7 @@ def aten_backend(
 
     gm.graph.lint()
     gm.recompile()
+    print(gm.code)
 
     # Get the memory manager object for memory analysis
     if option.run_mem_analysis:
