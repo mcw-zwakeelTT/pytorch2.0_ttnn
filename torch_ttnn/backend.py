@@ -73,16 +73,8 @@ def register_ttnn_objects(option: TorchTtnnOption):
         ttnn.L1_MEMORY_CONFIG,
     )
 
-    torch.fx.graph._register_custom_builtin(
-        "run_mode_normal",
-        "",
-        ttnn.graph.RunMode.NORMAL
-    )
-    torch.fx.graph._register_custom_builtin(
-        "run_mode_no_dispatch",
-        "",
-        ttnn.graph.RunMode.NO_DISPATCH
-    )
+    torch.fx.graph._register_custom_builtin("run_mode_normal", "", ttnn.graph.RunMode.NORMAL)
+    torch.fx.graph._register_custom_builtin("run_mode_no_dispatch", "", ttnn.graph.RunMode.NO_DISPATCH)
 
 
 # The backend for torch.compile that converts a graph to use ttnn.

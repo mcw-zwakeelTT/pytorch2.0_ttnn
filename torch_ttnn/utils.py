@@ -44,9 +44,11 @@ class TtnnL1MemoryConfig:
     def __repr__(self):
         return f"ttnn_L1_MEMORY_CONFIG"
 
+
 class TtnnRunModeNormal:
     def __repr__(self):
         return f"run_mode_normal"
+
 
 class TtnnRunModeNoDispatch:
     def __repr__(self):
