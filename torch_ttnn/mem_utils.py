@@ -8,7 +8,7 @@ device_name = "wormhole"
 cores = 120
 L1_mem = 1048576  # 1 MB
 circular_buffer = 20 * 1048576  # 20 MB
-# SRAM_LIMIT = cores * L1_mem - circular_buffer (100 MB in this case)
+SRAM_LIMIT = cores * L1_mem - circular_buffer  # (100 MB in this case)
 
 
 # This will manage all memory related operations & data
@@ -168,3 +168,12 @@ def get_tensor_size(shape, dtype):
     for val in list(shape):
         size = val * size
     return size
+
+
+class MemoryState:
+    def __init__(self):
+        self.peak_sram_usage = 0
+        self.fits_in_memory = None
+
+    def __repr__(self):
+        return f"ttnn_memory_state"

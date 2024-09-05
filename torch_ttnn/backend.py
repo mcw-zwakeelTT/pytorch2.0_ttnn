@@ -22,6 +22,7 @@ class TorchTtnnOption:
         device: ttnn.Device,
         gen_graphviz=False,
         run_mem_analysis=False,
+        run_tracer_pass=False,
         run_eviction_opt=False,
         verbose=True,
         metrics_path="",
@@ -32,8 +33,10 @@ class TorchTtnnOption:
         self.gen_graphviz = gen_graphviz
         self._out_fx_graphs = list()
         self.memory_manager = None
+        self.memory_state = mem_utils.MemoryState()
         self.run_mem_analysis = run_mem_analysis
         self.run_eviction_opt = run_eviction_opt
+        self.run_tracer_pass = run_tracer_pass
         self.verbose = verbose
         self.tracer_option = tracer_option
 
@@ -75,6 +78,7 @@ def register_ttnn_objects(option: TorchTtnnOption):
 
     torch.fx.graph._register_custom_builtin("run_mode_normal", "", ttnn.graph.RunMode.NORMAL)
     torch.fx.graph._register_custom_builtin("run_mode_no_dispatch", "", ttnn.graph.RunMode.NO_DISPATCH)
+    torch.fx.graph._register_custom_builtin("ttnn_memory_state", "", mem_utils.MemoryState())
 
 
 # The backend for torch.compile that converts a graph to use ttnn.
@@ -126,8 +130,11 @@ def aten_backend(
         EliminateCoreopsPass(),
         CSEPass(),
         PermuteReshapeTuple(),
-        TraceMemoryPass(),
     ]
+
+    tracer_pass = TraceMemoryPass(option.memory_state)
+    if option.run_tracer_pass:
+        passes.append(tracer_pass)
 
     mem_pass = MemoryPass(option.verbose)
     if option.run_mem_analysis:
