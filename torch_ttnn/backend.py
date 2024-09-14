@@ -130,8 +130,8 @@ def aten_backend(
         CSEPass(),
         PermuteReshapeTuple(),
     ]
-
-    tracer_pass = TraceMemoryPass(option.memory_state)
+    
+    tracer_pass = TraceMemoryPass(option.device)
     if option.run_tracer_pass:
         passes.append(tracer_pass)
 
@@ -154,7 +154,6 @@ def aten_backend(
 
     gm.graph.lint()
     gm.recompile()
-    print(gm.code)
 
     # Get the memory manager object for memory analysis
     if option.run_mem_analysis:
@@ -202,12 +201,12 @@ def aten_backend(
 
     option._out_fx_graphs.append(gm.graph)
 
-    for node in gm.graph.nodes:
-        if node.op == "placeholder":
-            print(f"{node.name}: {node.meta}")
+    # for node in gm.graph.nodes:
+    #     if node.op == "placeholder":
+    #         print(f"{node.name}: {node.meta}")
 
-    for number, line in enumerate(gm.code.splitlines()):
-        print(f"{number + 1}: {line}")
+    # for number, line in enumerate(gm.code.splitlines()):
+    #     print(f"{number + 1}: {line}")
 
     return make_boxed_func(gm)
 

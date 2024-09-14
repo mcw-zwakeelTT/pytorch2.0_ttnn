@@ -3,13 +3,17 @@ import ttnn
 import pandas as pd
 from torch.fx.passes.infra.pass_base import PassBase, PassResult
 from torch_ttnn.passes.lowering.add_data_move_pass import is_tt_compute
-from torch_ttnn.utils import TtnnRunModeNormal, TtnnRunModeNoDispatch
+from torch_ttnn.utils import TtnnRunModeNormal, TtnnRunModeNoDispatch, TtnnDevice
 
-from torch_ttnn.mem_utils import MemoryState, SRAM_LIMIT
+from torch_ttnn.mem_utils import *
 import json
+import traceback
+
+import faulthandler
+faulthandler.enable()
 
 
-def extract_peak_L1_memory_usage(trace, mem_state: MemoryState):
+def extract_peak_L1_memory_usage(trace):
     total_cb = 0
     total_buffer = 0
     peak_memory_usage = 0
@@ -46,10 +50,10 @@ def extract_peak_L1_memory_usage(trace, mem_state: MemoryState):
             current_op.pop()
         peak_memory_usage = max(peak_memory_usage, total_cb + total_buffer)
 
-    if peak_memory_usage > mem_state.peak_sram_usage:
-        mem_state.peak_sram_usage = peak_memory_usage
-    print(f"peak memory usage at current timestep: {peak_memory_usage}")
-    print(f"peak sram usage for the model: {mem_state.peak_sram_usage}")
+    # if peak_memory_usage > mem_state.peak_sram_usage:
+    #     mem_state.peak_sram_usage = peak_memory_usage
+    # print(f"peak memory usage at current timestep: {peak_memory_usage}")
+    # print(f"peak sram usage for the model: {mem_state.peak_sram_usage}")
     return peak_memory_usage
 
 
@@ -126,32 +130,107 @@ def check_sram_overflow(memory_state: MemoryState):
         memory_state.fits_in_memory = True
 
 
+def get_input_tensors_meta(graph):
+    ttnn_operations = []  # To store details of TT-NN operations
+    tensors = {}  # To map tensor node_id to tensor shape
+
+    # First, gather all tensors and their shapes
+    for node in graph:
+        if node['node_type'] == 'tensor':
+            tensor_id = node['counter']  # The unique identifier for the tensor
+            shape = node['params'].get('shape', None)  # Tensor shape
+            tensors[tensor_id] = shape
+
+    # Now, look for TT-NN operations and gather their input tensor details
+    for node in graph:
+        # Check if the node is a function_start and its name contains 'ttnn::'
+        if node['node_type'] == 'function_start' and 'name' in node['params']:
+            operation_name = node['params']['name']
+            
+            # Check if the operation is a TT-NN operation
+            if operation_name.startswith('ttnn::'):
+                # Extract number of input tensors
+                inputs = int(node['params'].get('inputs', 0))
+
+                # Collect connected tensors based on the connections to this node
+                input_tensor_sizes = []
+                for conn in node['connections']:
+                    # Check if the connected node is a tensor and has a shape
+                    if conn in tensors:
+                        input_tensor_sizes.append(tensors[conn])
+
+                # Add operation details along with the input tensor sizes
+                ttnn_operations.append({
+                    'operation': operation_name,
+                    'inputs': inputs,
+                    'input_tensor_sizes': input_tensor_sizes,
+                    'node_id': node['counter'],  # The unique identifier of the node
+                })
+    
+    return ttnn_operations
+
+
 class TraceMemoryPass(PassBase):
-    def __init__(self, memory_state: MemoryState):
-        self.memory_state = memory_state
+    def __init__(self, device):
+        self.device = device
+        self.op_registry = OpRegistry()
 
     def trace_memory(self, gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
-        mode = TtnnRunModeNormal()
-        nodes = list(gm.graph.nodes)
-        for node in nodes:
-            if is_tt_compute(node):
-                with gm.graph.inserting_before(node):
-                    gm.graph.call_function(ttnn.graph.begin_graph_capture, args=(mode,))
-                with gm.graph.inserting_after(node):
-                    res = gm.graph.call_function(ttnn.graph.end_graph_capture, args=())
-                with gm.graph.inserting_after(res):
-                    peak_sram = gm.graph.call_function(extract_peak_L1_memory_usage, args=(res, self.memory_state))
-                with gm.graph.inserting_after(peak_sram):
-                    gm.graph.call_function(logger, args=(res,))
-        with gm.graph.inserting_after():
-            gm.graph.call_function(check_sram_overflow, args=(self.memory_state,))
+        # mode = TtnnRunModeNoDispatch()
+        ttnn.graph.begin_graph_capture(ttnn.graph.RunMode.NO_DISPATCH)
+
+        # Pytorch by default enables fake tensor mode in fx graph parsing.
+        # So actual tensors are not created, rather its a FakeTensor.
+        # So fake tensor mode has to be explicitly disabled.
+        from torch.fx.experimental.proxy_tensor import maybe_disable_fake_tensor_mode
+        with maybe_disable_fake_tensor_mode():
+
+            nodes = list(gm.graph.nodes)
+            for node in nodes:
+                if is_tt_compute(node):
+                    print(f"Tracing {node.name}...")
+
+                    # If reshape on host, then skip
+                    if (
+                        node.target == ttnn.reshape and
+                        (node.args[0].target != ttnn.from_torch or
+                        "device" not in node.kwargs or
+                        not isinstance(node.kwargs["device"], TtnnDevice)) or
+                        node.target == ttnn.full
+                        ):
+                        continue
+
+                    inputs = []
+                    for input_node in node.all_input_nodes:
+                        tensor_shape, _ = self.op_registry.get_tensor_shape_and_dtype(input_node)
+                        torch_tensor = torch.rand(tensor_shape, dtype=torch.bfloat16)
+                        ttnn_tensor = ttnn.from_torch(torch_tensor, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
+                        inputs.append(ttnn_tensor)
+
+                    # Assumption: Tensors are first in the order of inputs
+                    # Inputs which are not tensors
+                    for arg in node.args:
+                        if isinstance(arg, tuple) or isinstance(arg, list):
+                            inputs.append(arg)
+
+                    output_tensor = node.target(*inputs)
+
+            torch_output_tensor = ttnn.to_torch(output_tensor)
+
+            captured_graph = ttnn.graph.end_graph_capture()
+
+        tensors_meta = get_input_tensors_meta(captured_graph)
+
+        print(f"\n\nTensor meta:")
+        print(json.dumps(tensors_meta, indent=4))
+        print(f"\n\nTrace json:")
+        print(json.dumps(captured_graph, indent=4))
+        print(f"\nPeak SRAM usage for the model: {extract_peak_L1_memory_usage(captured_graph)}")
+
         return gm
 
     def call(self, gm: torch.fx.GraphModule):
         gm = self.trace_memory(gm)
-        print(gm.code)
-        for node in list(gm.graph.nodes):
-            print(node)
         # import traceback
         # try:
         #     gm.recompile()
